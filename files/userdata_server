@@ -1,0 +1,120 @@
+#!/bin/bash
+set -x
+
+# Create shell profile file with k3s environment variables,
+# kubectl bash completion and alias.
+# Mirrors /etc/profile.d/rancher.sh from the RKE2 version, adjusted for k3s paths.
+cat << 'EOF' > /etc/profile.d/k3s.sh
+export KUBECONFIG=/etc/rancher/k3s/k3s.yaml
+export CRI_CONFIG_FILE=/var/lib/rancher/k3s/agent/etc/crictl.yaml
+export CONTAINERD_ADDRESS=/run/k3s/containerd/containerd.sock
+source <(kubectl completion bash 2>/dev/null)
+alias k=kubectl
+complete -F __start_kubectl k
+EOF
+
+# Create k3s config directory (equivalent to /etc/rancher/rke2/ in the original)
+mkdir -p /etc/rancher/k3s/
+
+# Write the common config shared by all server nodes.
+# RKE2 used a YAML config file; k3s supports the same format at /etc/rancher/k3s/config.yaml.
+cat <<EOF > /etc/rancher/k3s/config.yaml
+token: "${token}"
+tls-san:
+  - ${lb_ip}
+write-kubeconfig-mode: "0644"
+EOF
+
+# If this is not the first server node, point it at the load balancer so it joins
+# the existing cluster. In RKE2 this was "server: https://${lb_ip}:9345" (supervisor port).
+# k3s does not have a separate supervisor port; joining uses the standard API port 6443.
+if [ "${count}" -gt "0" ]; then
+  echo "server: https://${lb_ip}:6443" >> /etc/rancher/k3s/config.yaml
+fi
+
+# If this IS the first server node, enable embedded etcd cluster-init mode.
+# RKE2 always initialises etcd on the first server by default; k3s requires the
+# explicit --cluster-init flag (or config key) to enable embedded etcd HA.
+if [ "${count}" -eq "0" ]; then
+  echo "cluster-init: true" >> /etc/rancher/k3s/config.yaml
+fi
+
+# Set k3s version if specified (equivalent to INSTALL_RKE2_VERSION in the original)
+if [ ! -z "${k3s_version}" ]; then
+  export INSTALL_K3S_VERSION="${k3s_version}"
+fi
+
+# Install k3s server.
+# RKE2: curl -sfL https://get.rke2.io | sh -
+# k3s:  curl -sfL https://get.k3s.io | sh -s - server
+# The config file written above is picked up automatically by the installer.
+curl -sfL https://get.k3s.io | sh -s - server
+
+# Enable and start the k3s server service.
+# RKE2 used "rke2-server"; k3s uses "k3s".
+systemctl enable k3s
+systemctl start k3s
+
+# Install Rancher only on the first server node (same logic as the original)
+if [ "${count}" -eq "0" ]; then
+
+  # Set environment variables for Helm and kubectl
+  export KUBECONFIG=/etc/rancher/k3s/k3s.yaml
+  export HOME=/root
+
+  # Install Helm (identical to the original)
+  curl https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm-3 | bash
+
+  # Rancher Prime chart repo support — identical logic to the original.
+  # Falls back to rancher-latest when rancher_chart_repo is not set.
+  repo=rancher-latest/rancher
+  if [ -n "${rancher_chart_repo}" ]; then
+    helm repo add rancher-prime ${rancher_chart_repo}
+    helm repo update
+
+    if helm search repo rancher-prime/rancher-prime --version ${rancher_version} --fail-on-no-result; then
+      repo=rancher-prime/rancher-prime
+    elif helm search repo rancher-prime/rancher --version ${rancher_version} --fail-on-no-result; then
+      repo=rancher-prime/rancher
+    fi
+  fi
+
+  helm repo add jetstack https://charts.jetstack.io
+  helm repo add rancher-latest https://releases.rancher.com/server-charts/latest
+  helm repo update
+
+  # Wait for the k3s ingress controller to be ready before installing cert-manager
+  # and Rancher. In the original this waited for rke2-ingress-nginx-controller
+  # (a DaemonSet). k3s ships Traefik as its default ingress controller (a Deployment).
+  # We wait for the node to be Ready first, then for Traefik to roll out.
+  while ! kubectl get nodes 2>/dev/null | grep -q " Ready"; do
+    sleep 5
+  done
+  while ! kubectl -n kube-system rollout status deploy/traefik 2>/dev/null; do
+    sleep 5
+  done
+
+  # Install cert-manager (identical to the original, flag renamed installCRDs→crds.enabled
+  # for cert-manager >= v1.15 which deprecates installCRDs)
+  helm install cert-manager jetstack/cert-manager \
+    --namespace cert-manager \
+    --create-namespace \
+    --set crds.enabled=true
+
+  # Wait for the cert-manager webhook to be ready (identical to the original)
+  while ! kubectl -n cert-manager rollout status deploy/cert-manager-webhook; do
+    sleep 5
+  done
+
+  # Install Rancher.
+  # --set ingress.ingressClassName=traefik tells Rancher to use the k3s Traefik
+  # ingress instead of nginx (the RKE2 default). All other flags are identical
+  # to the original: nip.io hostname, version, bootstrapPassword.
+  helm install rancher $repo \
+    --namespace cattle-system \
+    --create-namespace \
+    --set hostname=${lb_ip}.nip.io \
+    --version ${rancher_version} \
+    --set bootstrapPassword="${admin_password}" \
+    --set ingress.ingressClassName=traefik
+fi

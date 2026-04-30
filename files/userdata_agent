@@ -1,0 +1,30 @@
+#!/bin/bash
+set -x
+
+# Create k3s config directory (equivalent to /etc/rancher/rke2/ in the original)
+mkdir -p /etc/rancher/k3s/
+
+# Write k3s agent config.
+# RKE2 used /etc/rancher/rke2/config.yaml with "token" and "server" keys;
+# k3s supports the same config format at /etc/rancher/k3s/config.yaml.
+# RKE2 agents joined on port 9345 (supervisor port); k3s agents join on port 6443.
+cat <<EOF > /etc/rancher/k3s/config.yaml
+token: "${token}"
+server: https://${lb_ip}:6443
+EOF
+
+# Set k3s version if specified (equivalent to INSTALL_K3S_VERSION in the original)
+if [ ! -z "${k3s_version}" ]; then
+  export INSTALL_K3S_VERSION="${k3s_version}"
+fi
+
+# Install k3s agent.
+# RKE2: INSTALL_RKE2_TYPE="agent" curl -sfL https://get.rke2.io | sh -
+# k3s:  curl -sfL https://get.k3s.io | sh -s - agent
+# The config file written above is picked up automatically.
+curl -sfL https://get.k3s.io | sh -s - agent
+
+# Enable and start the k3s agent service.
+# RKE2 used "rke2-agent"; k3s uses "k3s-agent".
+systemctl enable k3s-agent
+systemctl start k3s-agent
