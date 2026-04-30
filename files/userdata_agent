@@ -4,7 +4,7 @@ set -x
 # Create k3s config directory
 mkdir -p /etc/rancher/k3s/
 
-# RKE2 agents join on port 9345 (supervisor port); k3s agents join on port 6443.
+# k3s agents join on port 6443.
 cat <<EOF > /etc/rancher/k3s/config.yaml
 token: "${token}"
 server: https://${lb_ip}:6443
