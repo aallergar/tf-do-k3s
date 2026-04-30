@@ -29,7 +29,7 @@ server_size = "s-4vcpu-8gb"
 agent_size = "s-2vcpu-4gb"
 
 # Image of nodes
-image = "ubuntu-22-04-x64"
+image = "ubuntu-24-04-x64"
 
 # User for image
 user = "root"
